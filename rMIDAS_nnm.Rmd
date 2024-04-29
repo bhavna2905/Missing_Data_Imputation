@@ -1,0 +1,156 @@
+---
+title: "rMIDAS nnm"
+author: "Bhavna Sharma - bs1167"
+date: "2024-04-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+#loading libraries
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(car)
+library(mice)
+library(missForest)
+library(rsample)
+library(keras)
+#library(tensorflow)
+library(neuralnet)
+library(stats)
+library(DMwR)
+library(autoencoder)
+library(rMIDAS)
+
+set.seed(123)
+
+
+#Loading the data
+employee_data <- read.csv("/Users/bhavnasharma/Downloads/Employee Attrition.csv")
+class(employee_data)
+
+#inspecting the data
+head(employee_data)
+
+#summary of data
+summary(employee_data)
+#we should only look at satisfaction_level, last_evaluation, number_project, average_monthly_hours, time_spend_company
+#There are 788 NAs in Emp.ID, satisfaction_level, last_evaluation, number_project, average_monthly_hours, time_spend company,
+#Work_accident, and promotion_last_5_years
+
+# There exists already fully empty rows in ds
+clean_employee_data <- employee_data[complete.cases(employee_data), ]
+
+head(clean_employee_data) 
+
+summary(clean_employee_data)
+
+clean_employee_data <- clean_employee_data[,-1]
+
+clean_employee_data <- clean_employee_data %>%
+  mutate(Work_accident = ifelse(Work_accident == 0, 'no', 'yes'))
+
+clean_employee_data <- clean_employee_data %>%
+  mutate(promotion_last_5years = ifelse(promotion_last_5years == 0, 'no', 'yes'))
+
+clean_employee_data$dept <- as.factor(clean_employee_data$dept)
+clean_employee_data$salary <- as.factor(clean_employee_data$salary)
+clean_employee_data$Work_accident <- as.factor(clean_employee_data$Work_accident)
+clean_employee_data$promotion_last_5years <- as.factor(clean_employee_data$promotion_last_5years)
+clean_employee_data$number_project <- as.factor(clean_employee_data$number_project)
+clean_employee_data$time_spend_company <- as.factor(clean_employee_data$time_spend_company)
+
+
+
+
+summary(clean_employee_data)
+
+introduce_MCAR <- function(data, missing_prob) {
+  
+  data_with_missing <- prodNA(data, noNA = missing_prob)
+  
+  return(data_with_missing)
+}
+
+# Get row indices for the 70% split
+comp_index <- sample(1:nrow(clean_employee_data), size = 0.7*nrow(clean_employee_data))
+
+# Create the 70% split dataframe
+comp_data <- clean_employee_data[comp_index, ]
+
+# Create the 30% split dataframe
+incomp_data <- clean_employee_data[-comp_index, ]
+
+
+incomp_data <- introduce_MCAR(incomp_data, 0.3)
+
+employee_data <- rbind(comp_data, incomp_data)
+
+head(employee_data)
+
+summary(employee_data)
+
+# Third approach
+
+#Using denoising autoencoder package rMIDAS
+
+library(reticulate)
+library(rMIDAS)
+use_python("/Users/bhavnasharma/.virtualenvs/r-reticulate/bin/python", required = TRUE)
+
+emp_cat <- c('dept','salary', 'promotion_last_5years','Work_accident', 'number_project', 'time_spend_company')
+
+emp_conv <- convert(employee_data,
+                    cat_cols = emp_cat,
+                    minmax_scale = TRUE)
+
+emp_train <- train(emp_conv,
+                   training_epochs = 200,
+                   layer_structure = c(128,128),
+                   input_drop = 0.95,
+                   seed = 89)
+
+imputed_data <- complete(emp_train, m=1)
+
+imputed_data <- as.data.frame(imputed_data)
+
+# Plot
+
+cols <- colnames(clean_employee_data)
+
+for (col in cols) {
+  df1 <- data.frame(Value = clean_employee_data[[col]], Dataset = 'clean_employee_data')
+  df2 <- data.frame(Value = imputed_data[[col]], Dataset = 'imputed_data')
+  df <- rbind(df1, df2)
+  
+  if (is.numeric(df$Value)) {
+    # Create the histogram with faceting for numeric columns
+    p <- ggplot(df, aes(x=Value)) +
+      geom_histogram(aes(y=..density..), bins=30, alpha=0.5, position="identity") +
+      geom_density(alpha=.2, fill="#FF6666") +
+      facet_wrap(~Dataset, scales="free") +
+      ggtitle(paste("Histogram of", col, "in each dataset")) +
+      xlab(col) +
+      ylab("Density")
+  } else {
+    # Create the bar plot with faceting for categorical columns
+    p <- ggplot(df, aes(x=Value)) +
+      geom_bar(position="dodge") +
+      geom_smooth(aes(y=..count.., group=1), stat="count", method="loess", color="red", se=FALSE) +
+      facet_wrap(~Dataset, scales="free") +
+      ggtitle(paste("Bar plot of", col, "in each dataset")) +
+      xlab(col) +
+      ylab("Count")
+  
+    if (col == "dept") {
+      p <- p + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+    }
+  }
+  
+  print(p)
+}
+```

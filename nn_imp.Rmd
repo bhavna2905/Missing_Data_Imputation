@@ -1,0 +1,468 @@
+---
+title: "nn_imp"
+author: "Bhavna Sharma - bs1167"
+date: "2024-04-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+#loading libraries
+library(ggplot2)
+library(tidyverse)
+library(dplyr)
+library(car)
+library(mice)
+library(missForest)
+library(rsample)
+library(keras)
+#library(tensorflow)
+library(neuralnet)
+library(stats)
+library(DMwR)
+library(autoencoder)
+
+set.seed(123)
+
+
+employee_data <- read.csv("/Users/bhavnasharma/Downloads/Employee Attrition.csv")
+class(employee_data)
+
+#inspecting the data
+head(employee_data)
+
+#summary of data
+summary(employee_data)
+#we should only look at satisfaction_level, last_evaluation, number_project, average_monthly_hours, time_spend_company
+#There are 788 NAs in Emp.ID, satisfaction_level, last_evaluation, number_project, average_monthly_hours, time_spend company,
+#Work_accident, and promotion_last_5_years
+
+# There exists already fully empty rows in ds
+clean_employee_data <- employee_data[complete.cases(employee_data), ]
+
+head(clean_employee_data)
+
+summary(clean_employee_data)
+
+clean_employee_data <- clean_employee_data[,-1]
+
+clean_employee_data <- clean_employee_data %>%
+  mutate(Work_accident = ifelse(Work_accident == 0, 'no', 'yes'))
+
+clean_employee_data <- clean_employee_data %>%
+  mutate(promotion_last_5years = ifelse(promotion_last_5years == 0, 'no', 'yes'))
+
+clean_employee_data$dept <- as.factor(clean_employee_data$dept)
+clean_employee_data$salary <- as.factor(clean_employee_data$salary)
+clean_employee_data$Work_accident <- as.factor(clean_employee_data$Work_accident)
+clean_employee_data$promotion_last_5years <- as.factor(clean_employee_data$promotion_last_5years)
+
+summary(clean_employee_data)
+
+introduce_MCAR <- function(data, missing_column, missing_prob) {
+  
+  data_with_missing <- prodNA(data, noNA = missing_prob)
+  
+  return(data_with_missing)
+}
+
+
+# Get row indices for the 70% split
+comp_index <- sample(1:nrow(clean_employee_data), size = 0.7*nrow(clean_employee_data))
+
+# Create the 70% split dataframe
+comp_data <- clean_employee_data[comp_index, ]
+
+# Create the 30% split dataframe
+incomp_data <- clean_employee_data[-comp_index, ]
+
+
+incomp_data <- introduce_MCAR(incomp_data, 'dept', 0.3)
+
+employee_data <- rbind(comp_data, incomp_data)
+
+head(employee_data)
+
+summary(employee_data)
+
+# Check missingness in each column
+lapply(employee_data, function(x) sum(is.na(x)))
+
+# Check overall missingness in the dataframe
+sum(is.na(employee_data))
+
+
+# 1st approach
+
+
+# Prepare the data for the neural network
+data.matrix <- data.matrix(employee_data)
+
+# Create a mask for the missing values
+missing_mask <- is.na(data.matrix)
+
+# Replace missing values with a non-existant value
+data.matrix[missing_mask] <- -9999
+head(data.matrix)
+
+
+all_masked <- apply(data.matrix, 2, function(x) all(x == -9999))
+
+# Get the column indices that do not only contain the masking value
+cols_to_keep <- which(!all_masked)
+
+# Subset the data matrix to keep only the relevant columns
+data.matrix <- data.matrix[, cols_to_keep]
+
+# Create a model
+model <- keras_model_sequential() 
+model %>% 
+  layer_masking(mask_value = -9999, input_shape = c(ncol(data.matrix))) %>%
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dense(units = ncol(data.matrix), activation = 'linear')
+
+# Compile the model
+model %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_adam()
+)
+
+# Train the model
+model %>% fit(
+  data.matrix, data.matrix,
+  epochs = 200, batch_size = 256,
+  validation_split = 0.2
+)
+
+summary(model)
+
+# Predict the missing values
+predicted <- model %>% predict(data.matrix)
+
+data.matrix[missing_mask] <- predicted[missing_mask]
+
+imputed_data <- as.data.frame(data.matrix)
+
+clean_data_matrix <- data.matrix(clean_employee_data)
+
+if (dim(clean_data_matrix)[2] == dim(data.matrix)[2]) {
+  
+  mse <- mean((clean_data_matrix - data.matrix)^2, na.rm = TRUE)
+  print(paste("Mean Squared Error (MSE): ", mse))
+  
+} else {
+  print("The dimensions of the original data and the predicted data do not match.")
+}
+
+
+limits_list <- list(
+  satisfaction_level = c(0, 1),
+  last_evaluation = c(0, 1),
+  number_project = c(1, 10),
+  average_montly_hours = c(100, 300),
+  time_spend_company = c(1, 10),
+  Work_accident = c(-1, 4),
+  promotion_last_5years = c(-1, 4),
+  dept = c(0,11),  
+  salary = c(0,4) 
+)
+
+# Get the column names
+cols <- colnames(clean_data_matrix)
+
+# Loop through each column
+for (col in cols) {
+  # Create data frames for each dataset and column
+  df1 <- data.frame(Value = clean_data_matrix[,col], Dataset = 'Clean')
+  df2 <- data.frame(Value = data.matrix[,col], Dataset = 'Imputed')
+  
+  # Combine the data frames
+  df <- rbind(df1, df2)
+  
+  # Check if the column is numeric
+  if (is.numeric(df$Value)) {
+    # Create a histogram for numeric columns
+    p <- ggplot(df, aes(x=Value)) +
+      geom_histogram(aes(y=..density..), bins=30, alpha=0.5, position="identity") +
+      geom_density(alpha=.2, fill="#FF6666") +
+      xlim(xlim = limits_list[[col]]) +
+      facet_grid(Dataset ~ ., scales="free") +
+      ggtitle(paste("Histogram of", col, "in each dataset")) +
+      xlab(col) +
+      ylab("Density")
+  } else {
+    # Create a bar plot for categorical columns
+    p <- ggplot(df, aes(x=Value)) +
+      geom_bar(position="dodge") +
+      geom_smooth(aes(y=..count.., group=1), stat="count", method="loess", color="red", se=FALSE) +
+      facet_grid(Dataset ~ ., scales="free") +
+      ggtitle(paste("Bar plot of", col, "in each dataset")) +
+      xlab(col) +
+      ylab("Count")
+    
+    # Rotate x-axis text for 'dept' column
+    if (col == "dept") {
+      p <- p + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+    }
+  }
+  
+  # Print the plot
+  print(p)
+}
+
+
+
+
+limits_list <- list(
+  satisfaction_level = c(-10000, 1),
+  last_evaluation = c(-10000, 1),
+  number_project = c(-10000, 10),
+  average_montly_hours = c(-10000, 300),
+  time_spend_company = c(-10000, 10),
+  Work_accident = c(-10000, 1),
+  promotion_last_5years = c(-10000, 1),
+  dept = c(-10000,11),  
+  salary = c(-10000,4) 
+)
+
+# Get the column names
+cols <- colnames(clean_data_matrix)
+
+# Loop through each column
+for (col in cols) {
+  # Create data frames for each dataset and column
+  df1 <- data.frame(Value = clean_data_matrix[,col], Dataset = 'Clean')
+  df2 <- data.frame(Value = data.matrix[,col], Dataset = 'Imputed')
+  
+  # Combine the data frames
+  df <- rbind(df1, df2)
+  
+  # Check if the column is numeric
+  if (is.numeric(df$Value)) {
+    # Create a histogram for numeric columns
+    p <- ggplot(df, aes(x=Value)) +
+      geom_histogram(aes(y=..density..), bins=30, alpha=0.5, position="identity") +
+      geom_density(alpha=.2, fill="#FF6666") +
+      xlim(xlim = limits_list[[col]]) +
+      facet_grid(Dataset ~ ., scales="free") +
+      ggtitle(paste("Histogram of", col, "in each dataset")) +
+      xlab(col) +
+      ylab("Density")
+  } else {
+    # Create a bar plot for categorical columns
+    p <- ggplot(df, aes(x=Value)) +
+      geom_bar(position="dodge") +
+      geom_smooth(aes(y=..count.., group=1), stat="count", method="loess", color="red", se=FALSE) +
+      facet_grid(Dataset ~ ., scales="free") +
+      ggtitle(paste("Bar plot of", col, "in each dataset")) +
+      xlab(col) +
+      ylab("Count")
+    
+    # Rotate x-axis text for 'dept' column
+    if (col == "dept") {
+      p <- p + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+    }
+  }
+  
+  # Print the plot
+  print(p)
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+##Second Approach:
+  
+# Split the data into complete cases and rows with NAs
+complete_cases <- employee_data[complete.cases(employee_data), ]
+na_rows <- employee_data[!complete.cases(employee_data), ]
+
+head(complete_cases)
+
+# Convert binary factor variables to numeric
+complete_cases[] <- lapply(complete_cases, function(x) if(is.factor(x) && length(levels(x)) == 2) as.numeric(ifelse(x == "yes", 1, 0)) else x)
+
+# Identify factor columns
+factor_cols <- sapply(complete_cases, is.factor)
+
+# Apply model.matrix() only to factor columns
+complete_cases[factor_cols] <- lapply(complete_cases[factor_cols], function(x) {
+  contrasts(x) <- contr.treatment(levels(x), base = 1)
+  model.matrix(~.-1, data = data.frame(x))
+})
+head(complete_cases)
+
+
+# Normalize your data (very important for neural networks)
+complete_cases <- scale(complete_cases)
+
+# Create neural network model
+model <- keras_model_sequential() %>%
+  layer_dense(units = 128, activation = 'relu', input_shape = ncol(complete_cases)) %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = 128, activation = 'relu') %>%
+  layer_dropout(rate = 0.5) %>%
+  layer_dense(units = ncol(complete_cases))
+
+# Compile 
+model %>% compile(
+  loss = 'mean_squared_error',
+  optimizer = optimizer_adam()
+)
+
+summary(model)
+
+# Train 
+model %>% fit(complete_cases, complete_cases, epochs = 100, batch_size = 16, validation_split = 0.2)
+
+na_rows_filled <- na_rows
+head(na_rows_filled)
+for(i in 1:ncol(na_rows_filled)) {
+  if(is.numeric(na_rows_filled[,i])) {
+    na_rows_filled[is.na(na_rows_filled[,i]), i] <- mean(na_rows_filled[,i], na.rm = TRUE)
+  }
+  else {
+    na_rows_filled[is.na(na_rows_filled[,i]), i] <- names(which.max(table(na_rows_filled[,i])))
+  }
+}
+
+na_rows_filled[] <- lapply(na_rows_filled, function(x) if(is.factor(x) && length(levels(x)) == 2) as.numeric(ifelse(x == "yes", 1, 0)) else x)
+
+factor_cols <- sapply(na_rows_filled, is.factor)
+
+na_rows_filled[factor_cols] <- lapply(na_rows_filled[factor_cols], function(x) {
+  contrasts(x) <- contr.treatment(levels(x), base = 1)
+  model.matrix(~.-1, data = data.frame(x))
+})
+
+scaled_na_rows_filled <- scale(na_rows_filled)
+colnames(scaled_na_rows_filled)
+
+predictions <- model %>% predict(scaled_na_rows_filled)
+
+
+na_indices <- which(is.na(na_rows), arr.ind = TRUE)
+scaled_na_rows_filled[na_indices] <- predictions[na_indices]
+
+employee_data_imputed <- rbind(complete_cases, scaled_na_rows_filled)
+
+head(employee_data_imputed)
+
+employee_data_imputed <- unscale(employee_data_imputed, scaled_na_rows_filled)
+head(employee_data_imputed)
+
+print(class(employee_data_imputed))
+
+employee_data_imputed <- as.data.frame(employee_data_imputed)
+
+
+
+reverse_oht <- function(df, prefix) {
+  df_filtered <- df[, grepl(paste0("^", prefix), names(df))]
+  
+  colnames <- names(df_filtered)
+  
+  original_values <- character(nrow(df_filtered))
+  
+  for (i in 1:nrow(df_filtered)) {
+    original_values[i] <- colnames[which.max(df_filtered[i, ])]
+  }
+  
+  original_values <- gsub(paste0(prefix, "\\."), "", original_values)
+  
+  return(original_values)
+}
+
+original_dept <- reverse_oht(employee_data_imputed, "dept")
+original_salary <- reverse_oht(employee_data_imputed, "salary")
+
+cols_to_remove <- c(grep("^dept", names(employee_data_imputed), value = TRUE),
+                    grep("^salary", names(employee_data_imputed), value = TRUE))
+employee_data_imputed <- employee_data_imputed[ , !(names(employee_data_imputed) %in% cols_to_remove)]
+
+head(employee_data_imputed)
+
+# Replace the one-hot encoded 'dept' and 'salary' columns in the dataframe
+employee_data_imputed$dept <- original_dept
+employee_data_imputed$salary <- original_salary
+
+# Remove 'x' at the beginning of the 'dept' and 'salary' values
+employee_data_imputed$dept <- sub("^x", "", employee_data_imputed$dept)
+employee_data_imputed$salary <- sub("^x", "", employee_data_imputed$salary)
+
+head(employee_data_imputed)
+
+# Rounding the predicted probabilities to 0 or 1
+employee_data_imputed$Work_accident <- round(employee_data_imputed$Work_accident)
+employee_data_imputed$promotion_last_5years <- round(employee_data_imputed$promotion_last_5years)
+
+# Converting 0 and 1 to 'no' and 'yes'
+employee_data_imputed$Work_accident <- ifelse(employee_data_imputed$Work_accident == 0, 'no', 'yes')
+employee_data_imputed$promotion_last_5years <- ifelse(employee_data_imputed$promotion_last_5years == 0, 'no', 'yes')
+
+head(employee_data_imputed)
+
+
+
+cols <- colnames(clean_employee_data)
+
+limits_list <- list(
+  satisfaction_level = c(0, 1),
+  last_evaluation = c(0, 1),
+  number_project = c(1, 10),
+  average_montly_hours = c(100, 300),
+  time_spend_company = c(1, 10),
+  Work_accident = c(-1, 4),
+  promotion_last_5years = c(-1, 4),
+  dept = c(0,11),  
+  salary = c(0,4) 
+)
+
+
+for (col in cols) {
+  df1 <- data.frame(Value = clean_employee_data[[col]], Dataset = 'clean_employee_data')
+  df2 <- data.frame(Value = employee_data_imputed[[col]], Dataset = 'imputed_data')
+  df <- rbind(df1, df2)
+  
+  if (is.numeric(df$Value)) {
+    # Create the histogram with faceting for numeric columns
+    p <- ggplot(df, aes(x=Value)) +
+      geom_histogram(aes(y=..density..), bins=30, alpha=0.5, position="identity") +
+      geom_density(alpha=.2, fill="#FF6666") +
+      xlim(xlim = limits_list[[col]]) +
+      facet_wrap(~Dataset, scales="free") +
+      ggtitle(paste("Histogram of", col, "in each dataset")) +
+      xlab(col) +
+      ylab("Density")
+  } else {
+    # Create the bar plot with faceting for categorical columns
+    p <- ggplot(df, aes(x=Value)) +
+      geom_bar(position="dodge") +
+      geom_smooth(aes(y=..count.., group=1), stat="count", method="loess", color="red", se=FALSE) +
+      facet_wrap(~Dataset, scales="free") +
+      ggtitle(paste("Bar plot of", col, "in each dataset")) +
+      xlab(col) +
+      ylab("Count")
+    
+    if (col == "dept") {
+      p <- p + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+    }
+  }
+  
+  print(p)
+}
+```
